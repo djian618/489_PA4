@@ -159,7 +159,7 @@ marshall_imsg(imsg_t *imsg)
  *
  * Nothing else is modified.
 */
-char imgdb::
+char FIFO::
 recvqry(iqry_t *iqry)
 {
   int bytes;  // stores the return value of recvfrom()
@@ -367,20 +367,65 @@ sendimg(char *image, long imgsize)
   return;
 }
 
+
+/*FIFO::nextxmission() comprises the Task 2 portion of
+imgdb::sendimg() from Lab 7. It may be
+convenient to call Flow::nextFi() from 
+FIFO::nextxmission() to compute the current segment size 
+even if we don't need to compute any finish time.*/ 
+
+float FIFO::nextmission(){
+
+  //time need if there are enough tokens  this is second 
+  float fifo_next_time = running_flow.nextFi(1);
+  float token_need = ((float)(running_flow.segsize/IMGDB_BPTOK));
+
+     if(current_bsize < token_need){
+        float token_need_to_generate = token_need-current_bsize+((float)random()/INT_MAX)*bsize;
+        float time_wait = ((float)((token_need_to_generate)/trate));
+                
+        current_bsize = min(bsize,token_need_to_generate+current_bsize);
+        net_assert(judge > 0,"usleep work not in full function")
+        return (time_wait*1000000)+(fifo_next_time*1000000);
+     }
+     current_bsize -= token_need;
+
+
+
+
+
+
+
+
+}
+
+
 /*
  * handleqry: accept connection, then receive a query packet, search
  * for the queried image, and reply to client.
  */
-void imgdb::
+void FIFO::
 handleqry()
 {
+  
   iqry_t iqry;
   imsg_t imsg;
   double imgdsize;
   struct timeval start, end;
   int usecs, secs;
+  // The FIFO query handler should check 
+  //whether there's already an active flow in 
+  //the FIFO queue. If so, return an imsg_t packet
+  // with im_type set to NETIMG_EFULL to the client
 
   imsg.im_type = recvqry(&iqry);
+  if(running_flow.in_use == 1){
+    imsg.im_type = NETIMG_EFULL;
+    sendimsg(&imsg);
+    return;    
+  }
+
+
   if (imsg.im_type) { // error
     fprintf(stderr, "imgdb::handleqry: recvqry returns 0x%x.\n", imsg.im_type);
     sendimsg(&imsg);
@@ -391,7 +436,8 @@ handleqry()
     if (imsg.im_type == NETIMG_FOUND) {
       mss = (unsigned short) ntohs(iqry.iq_mss);
       rwnd = iqry.iq_rwnd;
-      frate = (unsigned short) ntohs(iqry.iq_frate);
+      //modify in the imgdb recive part
+      frate = (unsigned short) iqry.iq_frate;
       net_assert(!(mss && rwnd && frate),
                  "imgdb::sendimg: mss, rwnd, and frate cannot be zero");
       /*
@@ -415,26 +461,8 @@ handleqry()
       /* Lab7: YOUR CODE HERE */
       bsize = ceil((float)((mss-sizeof(ihdr_t)-NETIMG_UDPIP)*rwnd/IMGDB_BPTOK));
       trate = (frate*1000)/(IMGDB_BPTOK*8); 
-
-      imgdsize = marshall_imsg(&imsg);
-      net_assert((imgdsize > (double) LONG_MAX),
-                 "imgdb::sendimg: image too big");
-      gettimeofday(&start, NULL);
-      if (!sendimsg(&imsg)) {
-        sendimg((char *) curimg.GetPixels(), (long)imgdsize);
-      }
-      gettimeofday(&end, NULL);
-
-      /* compute elapsed time */
-      usecs = USECSPERSEC-start.tv_usec+end.tv_usec;
-      secs = end.tv_sec - start.tv_sec - 1;
-      if (usecs > USECSPERSEC) {
-        secs++;
-        usecs -= USECSPERSEC;
-      }
-      fprintf(stderr, "\nElapsed time (m:s:ms:us): %d:%d:%d:%d\n",
-              secs/60, secs%60, usecs/1000, usecs%1000);
-      
+      running_flow.init(sd, &client, &iqry, &imsg, currFi); 
+      current_bsize =  bsize;
     } else {
       sendimsg(&imsg);
     }

@@ -51,6 +51,8 @@ using namespace std;
 #include "netimg.h"
 #include "imgdb.h"
 #include <float.h>
+#include <math.h>          // ceil(), floor()
+
 #define USECSPERSEC 1000000
 
 /*
@@ -213,18 +215,19 @@ init(int sd, struct sockaddr_in *qhost, iqry_t *iqry,
  * is correct.
 */
 float Flow::
-nextFi(float multiplier)
+nextFi(float multiplier, bool is_fifo)
 {
   /* size of this segment */
   segsize = imgsize - snd_next;
   segsize = segsize > datasize ? datasize : segsize;
+
 
   /* Lab 8 Task 2: YOUR CODE HERE */
   /* Replace the following return statement with your
      computation of the next finish time as indicated above
      and return the result instead. */
   float next_fi = segsize/(multiplier*frate*128);
-  return (next_fi + Fi);
+  return (next_fi*1000000 + Fi);
 }
 
 /*
@@ -295,10 +298,11 @@ args(int argc, char *argv[])
   extern char *optarg;
   int arg;
 
-  linkrate = IMGDB_LRATE;
   minflow = IMGDB_MINFLOW;
+  fraction = IMGDB_INITFRAC;
+  linkrate = IMGDB_LRATE;
 
-  while ((c = getopt(argc, argv, "l:g:")) != EOF) {
+  while ((c = getopt(argc, argv, "l:g:f:")) != EOF) {
     switch (c) {
     case 'l':
       arg = atoi(optarg);
@@ -314,12 +318,15 @@ args(int argc, char *argv[])
       }
       minflow = (short) arg;
       break;
+    case 'f':
+      fraction = atof(optarg); 
     default:
       return(1);
       break;
     }
   }
-
+  wtq_linkrate = linkrate*fraction;
+  fifo_linkrate = linkrate*(1-fraction);
   srandom(NETIMG_SEED+linkrate+minflow);
 
   return (0);
@@ -412,6 +419,79 @@ sendimsg(struct sockaddr_in *qhost, imsg_t *imsg)
   return;
 }
 
+int imgdb::
+initalize_wfq(iqry_t* iqry, imsg_t*imsg, struct sockaddr_in* qhost){
+    int i =0;
+     for(i=0; i<IMGDB_MAXFLOW; i++){
+        if(flow[i].in_use==0){
+          if ( rsvdrate + iqry->iq_frate < linkrate ){
+            nflow++;
+            rsvdrate += iqry->iq_frate;
+            flow[i].init(sd, qhost, iqry, imsg, currFi);
+            break;
+          }
+        }
+     }
+
+     if(i==IMGDB_MAXFLOW){
+      imsg->im_type = NETIMG_EFULL;
+      sendimsg(qhost, imsg);
+      return (1);
+     }           
+    /* Toggle the "started" member variable to on (1) if minflow number
+     * of flows have arrived or total reserved rate is at link capacity
+     * and set the start time of each flow to the current wall clock time.
+     */
+ 
+   if (nflow >= minflow) {
+      started = 1;
+      for (i = 0; i < IMGDB_MAXFLOW; i++) {
+        if (flow[i].in_use) {
+          gettimeofday(&flow[i].start, NULL);
+        }
+      }
+    }
+
+  if (imsg->im_type != NETIMG_EAGAIN) {
+    // inform qhost of error or image dimensions if no error.
+    sendimsg(qhost, imsg);
+    return(1);
+  }
+
+  return(0);
+}
+
+
+int imgdb::wfq_nextxmission(){
+//this is mix of fifo and wtq
+  /* Lab 8 Task 3: YOUR CODE HERE */
+  int fd = IMGDB_MAXFLOW;
+  float min_time =FLT_MAX;
+  for(int i=0; i <IMGDB_MAXFLOW; i++){
+    if((flow[i].in_use==1)&&(min_time>flow[i].nextFi((float)wtq_linkrate/rsvdrate,false))){
+      min_time = flow[i].nextFi((float)wtq_linkrate/rsvdrate, false);
+      fd=i;
+    }
+  }
+  return fd;
+}
+
+float imgdb::fifo_nextxmission(){
+
+
+    float fifo_next_time = fifo_flow.nextFi(1, true);
+    token_need = ((float)(fifo_flow.segsize/IMGDB_BPTOK));
+     if(current_bsize < token_need){
+        float token_need_to_generate = token_need-current_bsize+((float)random()/INT_MAX)*bsize;
+        float time_wait = ((float)((token_need_to_generate)/trate));
+                
+        current_bsize = min(bsize,token_need_to_generate+current_bsize);
+        return (fifo_flow.Fi+(time_wait*1000000)+(fifo_next_time));
+     }
+     return (fifo_flow.Fi+fifo_next_time);
+     //remember to subtract the current_bsize after send
+}
+
 /*
  * imgdb::handleqry
  * Check for an iqry_t packet from client and set up a flow
@@ -445,60 +525,52 @@ handleqry()
   struct sockaddr_in qhost;
   
   imsg.im_type = recvqry(&qhost, &iqry);
-  if (!imsg.im_type) {
-    
+  unsigned short flow_indicator = ntohs(iqry.iq_frate);
+  int return_type;
+
+  if((!imsg.im_type)&&(flow_indicator>0)) {
+    //this is for wtq flow
     iqry.iq_mss = (unsigned short) ntohs(iqry.iq_mss);
     iqry.iq_frate = (unsigned short) ntohs(iqry.iq_frate);
-    
-    /* 
-     * Lab 8 Task 1: look for the first empty slot in flow[] to hold the new
-     * flow.  If an empty slot exists, check that we haven't hit
-     * linkrate capacity.  We can only add a flow if there's enough
-     * linkrate left over to accommodate the flow's reserved rate.
-     * Once a flow is admitted, increment flow count and total
-     * reserved rate, then call Flow::init() to initialize the flow.
-     * Flow::init() will update the imsg response packet accordingly.
-     * If a flow cannot be admitted due to capacity limit, return an
-     * imsg_t packet with im_type set to NETIMG_EFULL.
-     */
-    /* Lab 8 Task 1: YOUR CODE HERE */
-     for(i=0; i<IMGDB_MAXFLOW; i++){
-        if(flow[i].in_use==0){
-          if ( rsvdrate + iqry.iq_frate < linkrate ){
-            nflow++;
-            rsvdrate += iqry.iq_frate;
-            flow[i].init(sd, &qhost, &iqry, &imsg, currFi);
-            break;
-          }
-        }
-     }
-
-     if(i==IMGDB_MAXFLOW){
+    return initalize_wfq(&iqry, &imsg, &qhost);
+  }
+  else if ((!imsg.im_type)&&(flow_indicator==0)){
+    //this is for fifo flow
+    /*The FIFO query handler should check whether there's already an active flow in the 
+    FIFO queue. If so, return an imsg_t packet with im_type set to NETIMG_EFULL to the
+    client. Otherwise, initialize the flow by calling Flow::init() to load the image 
+    and setup the necessary token-bucket filter variables as in Lab 7.
+    The WFQ query handler can pretty much re-use the flow addition code in Lab 8.*/
+    if(fifo_flow.in_use==1){
       imsg.im_type = NETIMG_EFULL;
       sendimsg(&qhost, &imsg);
       return (1);
-     }           
-    /* Toggle the "started" member variable to on (1) if minflow number
-     * of flows have arrived or total reserved rate is at link capacity
-     * and set the start time of each flow to the current wall clock time.
-     */
-    if (!started && (nflow >= minflow || rsvdrate >= linkrate)) {
-      started = 1;
-      for (i = 0; i < IMGDB_MAXFLOW; i++) {
-        if (flow[i].in_use) {
-          gettimeofday(&flow[i].start, NULL);
-        }
-      }
     }
-  }
- 
-  if (imsg.im_type != NETIMG_EAGAIN) {
-    // inform qhost of error or image dimensions if no error.
-    sendimsg(&qhost, &imsg);
-    return(1);
-  }
-
-  return(0);
+    fifo_mss = (unsigned short) ntohs(iqry.iq_mss);
+    fifo_rwnd = iqry.iq_rwnd;
+    nflow++;
+    // set it to fifo frate
+    iqry.iq_frate = fifo_linkrate;
+    bsize = ceil((float)((fifo_mss-sizeof(ihdr_t)-NETIMG_UDPIP)*fifo_rwnd/IMGDB_BPTOK));
+    trate = (fifo_frate*1000)/(IMGDB_BPTOK*8); 
+    current_bsize = bsize;
+    fifo_flow.init(sd, &qhost, &iqry, &imsg, currFi); 
+    if (imsg.im_type != NETIMG_EAGAIN) {
+      // inform qhost of error or image dimensions if no error.
+      sendimsg(&qhost, &imsg);
+      return(1);
+    }   
+    if (nflow >= minflow) {
+        started = 1;
+        for (i = 0; i < IMGDB_MAXFLOW; i++) {
+          if (flow[i].in_use) {
+            gettimeofday(&flow[i].start, NULL);
+          }
+        }
+        gettimeofday(&fifo_flow.start, NULL);
+      }
+    return 1;
+  }  
 }
 
 /*
@@ -523,22 +595,12 @@ handleqry()
  * count.
  */
 void imgdb::
-sendpkt()
+wtq_sendpkt(int fd)
 {
-  int fd = IMGDB_MAXFLOW;
   struct timeval end;
   int secs, usecs;
   int done = 0;
 
-  /* Lab 8 Task 3: YOUR CODE HERE */
-  float min_time =FLT_MAX;
-  for(int i=0; i <IMGDB_MAXFLOW; i++){
-    if((flow[i].in_use==1)&&(min_time>flow[i].nextFi((float)linkrate/rsvdrate))){
-      min_time = flow[i].nextFi((float)linkrate/rsvdrate);
-      fd=i;
-    }
-  }
-  currFi = min_time;
   //fprintf(stderr, "current Fi is %f\n", currFi);
   done = flow[fd].sendpkt(sd, fd, currFi);
   if (done) {
@@ -565,12 +627,85 @@ sendpkt()
     }
     
     fprintf(stderr,
-            "imgdb::sendpkt: flow %d done, elapsed time (m:s:ms:us): %d:%d:%d:%d, reserved link rate: %d\n",
+            "imgdb::wtq_sendpkt: flow %d done, elapsed time (m:s:ms:us): %d:%d:%d:%d, reserved link rate: %d\n",
             fd, secs/60, secs%60, usecs/1000, usecs%1000, rsvdrate);
   }
 
   return;
 }
+
+
+
+void imgdb::
+fifo_sendpkt(float  fifo_next_finish_time){
+  int done = 0;
+  int secs, usecs;
+
+  done = fifo_flow.sendpkt(sd, -1, currFi);
+  current_bsize -= token_need;
+  struct timeval end;
+
+    if (done) {
+    /* Task 4: When done sending, remove flow from flow[] by calling
+     * Flow::done().  Deduct the flow's reserved rate (returned by
+     * Flow::done()) from the total reserved rate, and decrement the
+     * flow count.
+    */
+    /* Lab 8 Task 4: YOUR CODE HERE */
+    rsvdrate -= fifo_flow.done();
+    nflow--;
+    if (nflow <= 0) {
+      started = 0;
+    }
+
+    gettimeofday(&end, NULL);
+    /* compute elapsed time */
+    usecs = USECSPERSEC-fifo_flow.start.tv_usec+end.tv_usec;
+    secs = end.tv_sec - fifo_flow.start.tv_sec - 1;
+    if (usecs > USECSPERSEC) {
+      secs++;
+      usecs -= USECSPERSEC;
+    }
+    
+    fprintf(stderr,
+            "imgdb::fifo_sendpkt: flow %d done, elapsed time (m:s:ms:us): %d:%d:%d:%d, reserved link rate: %d\n",
+            -1, secs/60, secs%60, usecs/1000, usecs%1000, fifo_flow.frate);
+  }
+
+  return;
+}
+
+
+
+
+
+void imgdb::
+send_minimum()
+{
+  int fd = IMGDB_MAXFLOW;
+  float fifo_next_finish_time;
+  float wtq_next_finish_time;
+  struct timeval end;
+  int secs, usecs;
+  int done = 0;
+  bool send_fifo;
+  //fprintf(stderr, "current Fi is %f\n", currFi);
+  fd = wfq_nextxmission();
+  wtq_next_finish_time = flow[fd].nextFi((float)wtq_linkrate/rsvdrate, false);
+  fifo_next_finish_time = fifo_nextxmission();
+  float minimum_time = min(wtq_next_finish_time, fifo_next_finish_time);
+  if(minimum_time>currFi){
+    fprintf(stderr, "sleeep\n");
+    usleep(minimum_time-currFi);
+  }
+  currFi = minimum_time;
+  if(wtq_next_finish_time<fifo_next_finish_time){
+    return wtq_sendpkt(fd);
+  }else{
+    return fifo_sendpkt(fifo_next_finish_time);
+  }
+}
+
 
 int
 main(int argc, char *argv[])
@@ -590,7 +725,7 @@ main(int argc, char *argv[])
     // continue to add flow while there are incoming requests
     while(imgdb.handleqry());
 
-    imgdb.sendpkt();
+    imgdb.send_minimum();
   }
     
 #ifdef _WIN32

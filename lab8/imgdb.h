@@ -38,12 +38,13 @@
 #define IMGDB_LRATE         10240   // link rate, in Kbps
 #define IMGDB_MINLRATE          1   // minimum link rate, in Mbps
 #define IMGDB_MAXLRATE         10   // maximum link rate, in Mbps
-
+#define IMGDB_INITFRAC         0.5
 class Flow {
   LTGA curimg;
   long imgsize;
   char *ip;               // pointer to start of image
   int snd_next;           // offset from start of image
+public:
 
   struct sockaddr_in client;
 
@@ -52,7 +53,6 @@ class Flow {
 
   unsigned short datasize;
   int segsize;
-
   float Fi;               // finish time of last pkt sent
 
   ihdr_t hdr;
@@ -61,14 +61,14 @@ class Flow {
 
   char readimg(char *imgname, int verbose);
   double marshall_imsg(imsg_t *imsg);
-public:
   int in_use;             // 1: in use; 0: not
   struct timeval start;   // flow creation wall-clock time
+
 
   Flow() { in_use = 0; }
   void init(int sd, struct sockaddr_in *qhost,
             iqry_t *iqry, imsg_t *imsg, float currFi);
-  float nextFi(float multiplier);
+  float nextFi(float multiplier, bool is_fifo);
   int sendpkt(int sd, int fd, float currFi);
   /* Flow::done: set flow to not "in_use" and return the flow's
      reserved rate to be deducted from total reserved rate. */
@@ -81,18 +81,30 @@ class imgdb {
   char sname[NETIMG_MAXFNAME];
 
   Flow flow[IMGDB_MAXFLOW];
-  unsigned short rsvdrate;  // reserved rate, in Kbps
-  unsigned short linkrate;  // in Kbps
-  float currFi;             // current finish time
+  Flow fifo_flow;
 
+  unsigned short rsvdrate;  // reserved rate, in Kbps
+  unsigned short linkrate;
+  unsigned short wtq_linkrate;  // in Kbps
+  unsigned short fifo_linkrate;  // in Kbps
+
+  float fraction;
+  float currFi;             // current finish time
   // to implement gated transmission start
   short minflow;  // number of flows to trigger gated start
   short nflow;    // number of resident flows
   short started;  // or not
-
+  
   // image query-reply
   char recvqry(struct sockaddr_in *qhost, iqry_t *iqry);
   void sendimsg(struct sockaddr_in *qhost, imsg_t *imsg);
+//for fifo 
+  float bsize; // bucket size, in number of tokens
+  float trate; // token generation rate, in tokens/sec
+  unsigned short fifo_mss;   // receiver's maximum segment size, in bytes
+  unsigned char fifo_rwnd;   // receiver's window, in packets, each of size <= mss
+  unsigned short fifo_frate; // flow rate, in Kbps
+  float token_need;
 
 public:
   imgdb() {  // default constructor
@@ -101,11 +113,17 @@ public:
     currFi = 0.0;
     nflow = started = 0;
   }
-
+  float current_bsize;
   int args(int argc, char *argv[]);
 
   int handleqry();
   void sendpkt();
+  int wfq_nextxmission();
+  float fifo_nextxmission();
+  int initalize_wfq(iqry_t* iqry, imsg_t*imsg, struct sockaddr_in* qhost);
+  void wtq_sendpkt(int fd);
+  void fifo_sendpkt(float  fifo_next_finish_time);
+  void send_minimum();
 };  
 
 #endif /* __IMGDB_H__ */

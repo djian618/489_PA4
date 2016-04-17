@@ -33,7 +33,7 @@
 
 #define IMGDB_BPTOK     512   // bytes per token
 
-class imgdb {
+class FIFO {
   struct sockaddr_in self;
   char sname[NETIMG_MAXFNAME];
 
@@ -55,13 +55,13 @@ class imgdb {
 
 public:
   int sd;  // image socket
-
+  Flow running_flow;
   imgdb() { // default constructor
     sd = socks_servinit((char *) "imgdb", &self, sname);
     srandom(NETIMG_SEED+IMGDB_BPTOK+NETIMG_FRATE);
   }
-
-  int args(int argc, char *argv[]);
+  float current_bsize;
+  float nextmission();
 
   // image query-reply
   void handleqry();

@@ -103,7 +103,7 @@ class imgdb {
   float trate; // token generation rate, in tokens/sec
   unsigned short fifo_mss;   // receiver's maximum segment size, in bytes
   unsigned char fifo_rwnd;   // receiver's window, in packets, each of size <= mss
-  unsigned short fifo_frate; // flow rate, in Kbps
+//  unsigned short fifo_frate; // flow rate, in Kbps
   float token_need;
 
 public:

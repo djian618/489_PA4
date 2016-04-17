@@ -444,6 +444,7 @@ initalize_wfq(iqry_t* iqry, imsg_t*imsg, struct sockaddr_in* qhost){
      */
  
    if (nflow >= minflow) {
+      fprintf(stderr, "imgdb started\n");
       started = 1;
       for (i = 0; i < IMGDB_MAXFLOW; i++) {
         if (flow[i].in_use) {
@@ -459,6 +460,7 @@ initalize_wfq(iqry_t* iqry, imsg_t*imsg, struct sockaddr_in* qhost){
   }
 
   return(0);
+
 }
 
 
@@ -484,11 +486,11 @@ float imgdb::fifo_nextxmission(){
      if(current_bsize < token_need){
         float token_need_to_generate = token_need-current_bsize+((float)random()/INT_MAX)*bsize;
         float time_wait = ((float)((token_need_to_generate)/trate));
-                
+        fprintf(stderr, "FIFO::nextxmission: accumulating tokens for ms:%d\n", time_wait*1000000);        
         current_bsize = min(bsize,token_need_to_generate+current_bsize);
-        return (fifo_flow.Fi+(time_wait*1000000)+(fifo_next_time));
+        return ((time_wait*1000000)+(fifo_next_time));
      }
-     return (fifo_flow.Fi+fifo_next_time);
+     return (fifo_next_time);
      //remember to subtract the current_bsize after send
 }
 
@@ -530,6 +532,7 @@ handleqry()
 
   if((!imsg.im_type)&&(flow_indicator>0)) {
     //this is for wtq flow
+    fprintf(stderr, "this flow is the wtq flow\n");
     iqry.iq_mss = (unsigned short) ntohs(iqry.iq_mss);
     iqry.iq_frate = (unsigned short) ntohs(iqry.iq_frate);
     return initalize_wfq(&iqry, &imsg, &qhost);
@@ -547,19 +550,16 @@ handleqry()
       return (1);
     }
     fifo_mss = (unsigned short) ntohs(iqry.iq_mss);
+    iqry.iq_mss = fifo_mss;
     fifo_rwnd = iqry.iq_rwnd;
     nflow++;
     // set it to fifo frate
     iqry.iq_frate = fifo_linkrate;
     bsize = ceil((float)((fifo_mss-sizeof(ihdr_t)-NETIMG_UDPIP)*fifo_rwnd/IMGDB_BPTOK));
-    trate = (fifo_frate*1000)/(IMGDB_BPTOK*8); 
+    trate = (fifo_linkrate*1000)/(IMGDB_BPTOK*8); 
     current_bsize = bsize;
     fifo_flow.init(sd, &qhost, &iqry, &imsg, currFi); 
-    if (imsg.im_type != NETIMG_EAGAIN) {
-      // inform qhost of error or image dimensions if no error.
-      sendimsg(&qhost, &imsg);
-      return(1);
-    }   
+    
     if (nflow >= minflow) {
         started = 1;
         for (i = 0; i < IMGDB_MAXFLOW; i++) {
@@ -569,8 +569,15 @@ handleqry()
         }
         gettimeofday(&fifo_flow.start, NULL);
       }
-    return 1;
-  }  
+  }
+
+  if (imsg.im_type != NETIMG_EAGAIN) {
+    // inform qhost of error or image dimensions if no error.
+    sendimsg(&qhost, &imsg);
+    return(1);
+  }
+
+  return(0);  
 }
 
 /*
@@ -652,7 +659,7 @@ fifo_sendpkt(float  fifo_next_finish_time){
      * flow count.
     */
     /* Lab 8 Task 4: YOUR CODE HERE */
-    rsvdrate -= fifo_flow.done();
+    int done_resvrate = fifo_flow.done();
     nflow--;
     if (nflow <= 0) {
       started = 0;
@@ -683,16 +690,20 @@ void imgdb::
 send_minimum()
 {
   int fd = IMGDB_MAXFLOW;
-  float fifo_next_finish_time;
-  float wtq_next_finish_time;
+  float fifo_next_finish_time = FLT_MAX;
+  float wtq_next_finish_time = FLT_MAX;
   struct timeval end;
   int secs, usecs;
   int done = 0;
   bool send_fifo;
   //fprintf(stderr, "current Fi is %f\n", currFi);
   fd = wfq_nextxmission();
-  wtq_next_finish_time = flow[fd].nextFi((float)wtq_linkrate/rsvdrate, false);
-  fifo_next_finish_time = fifo_nextxmission();
+  if(fd<IMGDB_MAXFLOW){
+    wtq_next_finish_time = flow[fd].nextFi((float)wtq_linkrate/rsvdrate, false);
+  }
+  if(fifo_flow.in_use){
+    fifo_next_finish_time = fifo_nextxmission();
+  }
   float minimum_time = min(wtq_next_finish_time, fifo_next_finish_time);
   if(minimum_time>currFi){
     fprintf(stderr, "sleeep\n");

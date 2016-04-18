@@ -40,11 +40,12 @@
 #define IMGDB_MAXLRATE         10   // maximum link rate, in Mbps
 #define IMGDB_INITFRAC         0.5
 class Flow {
+public:
+
   LTGA curimg;
   long imgsize;
   char *ip;               // pointer to start of image
   int snd_next;           // offset from start of image
-public:
 
   struct sockaddr_in client;
 
@@ -76,6 +77,8 @@ public:
 };
 
 class imgdb {
+public:
+
   int sd;  // image socket
   struct sockaddr_in self;
   char sname[NETIMG_MAXFNAME];
@@ -105,13 +108,15 @@ class imgdb {
   unsigned char fifo_rwnd;   // receiver's window, in packets, each of size <= mss
 //  unsigned short fifo_frate; // flow rate, in Kbps
   float token_need;
+  float token_need_to_generate;
 
-public:
   imgdb() {  // default constructor
     sd = socks_servinit((char *) "imgdb", &self, sname);
     rsvdrate = 0;
     currFi = 0.0;
     nflow = started = 0;
+    token_need =0;
+    token_need_to_generate = 0;
   }
   float current_bsize;
   int args(int argc, char *argv[]);

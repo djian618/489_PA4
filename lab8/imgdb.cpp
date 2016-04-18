@@ -168,7 +168,7 @@ init(int sd, struct sockaddr_in *qhost, iqry_t *iqry,
       net_assert((err < 0), "Flow::init: setsockopt SNDBUF");
     }
     datasize = mss - sizeof(ihdr_t) - NETIMG_UDPIP;
-
+    fprintf(stderr, "datasize is %d\n", datasize);
     // flow's reserved rate as specified by client
     // flow's initial finish time is the current global minimum finish time
     frate = iqry->iq_frate;
@@ -320,6 +320,7 @@ args(int argc, char *argv[])
       break;
     case 'f':
       fraction = atof(optarg); 
+      break;
     default:
       return(1);
       break;
@@ -451,6 +452,11 @@ initalize_wfq(iqry_t* iqry, imsg_t*imsg, struct sockaddr_in* qhost){
           gettimeofday(&flow[i].start, NULL);
         }
       }
+      if(fifo_flow.in_use){
+          gettimeofday(&fifo_flow.start, NULL);
+      }
+
+
     }
 
   if (imsg->im_type != NETIMG_EAGAIN) {
@@ -479,15 +485,13 @@ int imgdb::wfq_nextxmission(){
 }
 
 float imgdb::fifo_nextxmission(){
-
-
-    float fifo_next_time = fifo_flow.nextFi(1, true);
+  float fifo_next_time = fifo_flow.nextFi(1, true);
     token_need = ((float)(fifo_flow.segsize/IMGDB_BPTOK));
      if(current_bsize < token_need){
-        float token_need_to_generate = token_need-current_bsize+((float)random()/INT_MAX)*bsize;
+        token_need_to_generate = token_need-current_bsize+((float)random()/INT_MAX)*bsize;
         float time_wait = ((float)((token_need_to_generate)/trate));
-        fprintf(stderr, "FIFO::nextxmission: accumulating tokens for ms:%d\n", time_wait*1000000);        
-        current_bsize = min(bsize,token_need_to_generate+current_bsize);
+        //fprintf(stderr, "FIFO::nextxmission: accumulating tokens for ms:%f\n", time_wait);        
+        //current_bsize = min(bsize,token_need_to_generate+current_bsize);
         return ((time_wait*1000000)+(fifo_next_time));
      }
      return (fifo_next_time);
@@ -567,7 +571,9 @@ handleqry()
             gettimeofday(&flow[i].start, NULL);
           }
         }
-        gettimeofday(&fifo_flow.start, NULL);
+        if(fifo_flow.in_use){
+          gettimeofday(&fifo_flow.start, NULL);
+        }
       }
   }
 
@@ -649,7 +655,11 @@ fifo_sendpkt(float  fifo_next_finish_time){
   int secs, usecs;
 
   done = fifo_flow.sendpkt(sd, -1, currFi);
+  if(current_bsize<token_need){
+    current_bsize = min(bsize,token_need_to_generate+current_bsize);
+  }
   current_bsize -= token_need;
+  
   struct timeval end;
 
     if (done) {
@@ -706,7 +716,7 @@ send_minimum()
   }
   float minimum_time = min(wtq_next_finish_time, fifo_next_finish_time);
   if(minimum_time>currFi){
-    fprintf(stderr, "sleeep\n");
+    //fprintf(stderr, "sleeep\n");
     usleep(minimum_time-currFi);
   }
   currFi = minimum_time;
